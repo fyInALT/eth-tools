@@ -17,13 +17,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"slices"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/common"
@@ -82,21 +84,6 @@ This command dumps out the state for a given block (or latest, if none provided)
 )
 
 func dumpGenesis(ctx *cli.Context) error {
-	// check if there is a testnet preset enabled
-	var genesis *core.Genesis
-	if utils.IsNetworkPreset(ctx) {
-		genesis = utils.MakeGenesis(ctx)
-	} else if ctx.IsSet(utils.DeveloperFlag.Name) && !ctx.IsSet(utils.DataDirFlag.Name) {
-		genesis = core.DeveloperGenesisBlock(11_500_000, nil)
-	}
-
-	if genesis != nil {
-		if err := json.NewEncoder(os.Stdout).Encode(genesis); err != nil {
-			utils.Fatalf("could not encode genesis: %s", err)
-		}
-		return nil
-	}
-
 	// dump whatever already exists in the datadir
 	stack, _ := makeConfigNode(ctx)
 
@@ -106,7 +93,7 @@ func dumpGenesis(ctx *cli.Context) error {
 	}
 	defer db.Close()
 
-	genesis, err = core.ReadGenesis(db)
+	genesis, err := core.ReadGenesis(db)
 	if err != nil {
 		utils.Fatalf("failed to read genesis: %s", err)
 	}
@@ -175,24 +162,90 @@ func parseDumpConfig(ctx *cli.Context, db ethdb.Database) (*state.DumpConfig, co
 	return conf, header.Root, nil
 }
 
-// RawDump returns the state. If the processing is aborted e.g. due to options
-// reaching Max, the `Next` key is set on the returned Dump.
-func RawDump(s *state.StateDB, opts *state.DumpConfig) state.Dump {
-	dump := &state.Dump{
-		Accounts: make(map[string]state.DumpAccount),
+// Dump represents the full dump in a collected format, as one large map.
+type DumpData struct {
+	writer        *Writer
+	startTime     time.Time
+	lastTime      time.Time
+	per10000count int64
+	count         int64
+	// Next can be set to represent that this dump is only partial, and Next
+	// is where an iterator should be positioned in order to continue the dump.
+	Next []byte `json:"next,omitempty"` // nil if no more accounts
+}
+
+// OnRoot implements DumpCollector interface
+func (d *DumpData) OnRoot(root common.Hash) {
+	fmt.Printf("had dump root %s\n", root.Hex())
+
+	d.writer.OnRoot(root)
+}
+
+// OnAccount implements DumpCollector interface
+func (d *DumpData) OnAccount(addr *common.Address, account state.DumpAccount) {
+	dumpAccount := &state.DumpAccount{
+		Balance:     account.Balance,
+		Nonce:       account.Nonce,
+		Root:        account.Root,
+		CodeHash:    account.CodeHash,
+		Code:        account.Code,
+		Storage:     account.Storage,
+		AddressHash: account.AddressHash,
+		Address:     addr,
 	}
-	dump.Next = s.DumpToCollector(dump, opts)
-	return *dump
+	d.writer.OnAccount(dumpAccount)
+
+	d.count += 1
+	if d.count%10000 == 0 {
+		d.per10000count += 1
+
+		now := time.Now()
+		all := now.Sub(d.startTime)
+		last := now.Sub(d.lastTime)
+
+		if d.per10000count < 1600 {
+			per := all.Milliseconds() / d.per10000count
+			need := per * (1601 - d.per10000count)
+			timezone := int((8 * time.Hour).Seconds())
+			shanghaiTimezone := time.FixedZone("Asia/Shanghai", timezone)
+
+			fmt.Printf("%s-%s had dump %v accounts, cost %d, need %d ms\n",
+				d.lastTime.In(shanghaiTimezone).Format("15:04:05"),
+				now.In(shanghaiTimezone).Format("15:04:05"),
+				d.count, last.Microseconds(), need/1e3)
+		} else {
+			fmt.Printf("had dump %v accounts\n", d.count)
+		}
+
+		d.lastTime = now
+	}
 }
 
 // Dump returns a JSON string representing the entire state as a single json-object
-func Dump(s *state.StateDB, opts *state.DumpConfig) []byte {
-	dump := RawDump(s, opts)
-	json, err := json.MarshalIndent(dump, "", "    ")
-	if err != nil {
-		log.Error("Error dumping state", "err", err)
+func Dump(ctx context.Context, file *os.File, s *state.StateDB, opts *state.DumpConfig) error {
+	writer := &Writer{
+		encoder:  json.NewEncoder(file),
+		accounts: make(chan *state.DumpAccount, 4096),
+		roots:    make(chan common.Hash, 4096),
 	}
-	return json
+	writer.Run(ctx)
+
+	dump := &DumpData{
+		writer:    writer,
+		startTime: time.Now(),
+		lastTime:  time.Now(),
+	}
+	dump.Next = s.DumpToCollector(dump, opts)
+	return nil
+}
+
+// printChainMetadata prints out chain metadata to stderr.
+func printChainMetadata(db ethdb.KeyValueStore) {
+	fmt.Fprintf(os.Stderr, "Chain metadata\n")
+	for _, v := range rawdb.ReadChainMetadata(db) {
+		fmt.Fprintf(os.Stderr, "  %s\n", strings.Join(v, ": "))
+	}
+	fmt.Fprintf(os.Stderr, "\n\n")
 }
 
 func dump(ctx *cli.Context) error {
@@ -201,6 +254,8 @@ func dump(ctx *cli.Context) error {
 
 	db := utils.MakeChainDatabase(ctx, stack, true)
 	defer db.Close()
+
+	// printChainMetadata(db)
 
 	conf, root, err := parseDumpConfig(ctx, db)
 	if err != nil {
@@ -214,7 +269,6 @@ func dump(ctx *cli.Context) error {
 		return err
 	}
 
-	content := string(Dump(state, conf))
 	fileName := JSONFileFlag.Value
 	if fileName == "" {
 		return fmt.Errorf("need use file")
@@ -230,12 +284,7 @@ func dump(ctx *cli.Context) error {
 	}
 	defer file.Close()
 
-	_, err = io.WriteString(file, content)
-	if err != nil {
-		return fmt.Errorf("Error writing to file: %w", err)
-	}
-
-	return nil
+	return Dump(ctx.Context, file, state, conf)
 }
 
 // hashish returns true for strings that look like hashes.
