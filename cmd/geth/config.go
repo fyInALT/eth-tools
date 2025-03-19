@@ -154,8 +154,8 @@ func loadBaseConfig(ctx *cli.Context) gethConfig {
 func makeConfigNode(ctx *cli.Context) (*node.Node, gethConfig) {
 	cfg := loadBaseConfig(ctx)
 
-	fmt.Printf("cfg %s %v %v",
-		cfg.Eth.SyncMode.String(), cfg.Eth.NoPruning, cfg.Eth.TransactionHistory)
+	log.Info(fmt.Sprintf("cfg %s %v %v",
+		cfg.Eth.SyncMode.String(), cfg.Eth.NoPruning, cfg.Eth.TransactionHistory))
 
 	stack, err := node.New(&cfg.Node)
 	if err != nil {

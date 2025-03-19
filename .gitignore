@@ -1,2 +1,4 @@
 bin/geth-tool
 testdata/dump.json
+datadir
+dump.json
