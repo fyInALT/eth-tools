@@ -4,8 +4,6 @@ go 1.23.3
 
 replace github.com/ethereum/go-ethereum => github.com/ethereum-optimism/op-geth v1.101503.1
 
-replace github.com/ethereum/go-ethereum/core/state => ./state
-
 require (
 	github.com/VictoriaMetrics/fastcache v1.12.2
 	github.com/ethereum/go-ethereum v1.15.5

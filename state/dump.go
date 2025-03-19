@@ -110,6 +110,12 @@ func (d iterativeDump) OnRoot(root common.Hash) {
 	}{root})
 }
 
+func DebugForDetail(accountCount uint64, msg string, ctx ...interface{}) {
+	//if accountCount > 272000 && accountCount < 300000 {
+	log.Debug(msg, ctx...)
+	//}
+}
+
 // DumpToCollector iterates the state according to the given options and inserts
 // the items into a collector for aggregation or serialization.
 func (s *StateDB) DumpToCollector(c DumpCollector, conf *DumpConfig) (nextKey []byte) {
@@ -123,79 +129,109 @@ func (s *StateDB) DumpToCollector(c DumpCollector, conf *DumpConfig) (nextKey []
 		start            = time.Now()
 		logged           = time.Now()
 	)
-	log.Info("Trie dumping started", "root", s.trie.Hash())
-	c.OnRoot(s.trie.Hash())
+	log.Info("Trie dumping started", "root", s.GetTrie().Hash())
+	c.OnRoot(s.GetTrie().Hash())
 
-	trieIt, err := s.trie.NodeIterator(conf.Start)
+	trieIt, err := s.GetTrie().NodeIterator(conf.Start)
 	if err != nil {
 		log.Error("Trie dumping error", "err", err)
 		return nil
 	}
 	it := trie.NewIterator(trieIt)
 	for it.Next() {
-		var data types.StateAccount
-		if err := rlp.DecodeBytes(it.Value, &data); err != nil {
-			panic(err)
-		}
-		var (
-			account = DumpAccount{
-				Balance:     data.Balance.String(),
-				Nonce:       data.Nonce,
-				Root:        data.Root[:],
-				CodeHash:    data.CodeHash,
-				AddressHash: it.Key,
+		log.Debug("start process", "count", accounts, "missingPreimages", missingPreimages)
+
+		isBreak := func() bool {
+			var data types.StateAccount
+			if err := rlp.DecodeBytes(it.Value, &data); err != nil {
+				panic(err)
 			}
-			address   *common.Address
-			addr      common.Address
-			addrBytes = s.trie.GetKey(it.Key)
-		)
-		if addrBytes == nil {
-			missingPreimages++
-			if conf.OnlyWithAddresses {
-				continue
-			}
-		} else {
-			addr = common.BytesToAddress(addrBytes)
-			address = &addr
-			account.Address = address
-		}
-		obj := newObject(s, addr, &data)
-		if !conf.SkipCode {
-			account.Code = obj.Code()
-		}
-		if !conf.SkipStorage {
-			account.Storage = make(map[common.Hash]string)
-			tr, err := obj.getTrie()
-			if err != nil {
-				log.Error("Failed to load storage trie", "err", err)
-				continue
-			}
-			trieIt, err := tr.NodeIterator(nil)
-			if err != nil {
-				log.Error("Failed to create trie iterator", "err", err)
-				continue
-			}
-			storageIt := trie.NewIterator(trieIt)
-			for storageIt.Next() {
-				_, content, _, err := rlp.Split(storageIt.Value)
-				if err != nil {
-					log.Error("Failed to decode the value returned by iterator", "error", err)
-					continue
+
+			DebugForDetail(accounts, "data got")
+			var (
+				account = DumpAccount{
+					Balance:     data.Balance.String(),
+					Nonce:       data.Nonce,
+					Root:        data.Root[:],
+					CodeHash:    data.CodeHash,
+					AddressHash: it.Key,
 				}
-				account.Storage[common.BytesToHash(s.trie.GetKey(storageIt.Key))] = common.Bytes2Hex(content)
+				address   *common.Address
+				addr      common.Address
+				addrBytes = s.GetTrie().GetKey(it.Key)
+			)
+
+			DebugForDetail(accounts, "GetTrie got")
+
+			if addrBytes == nil {
+				DebugForDetail(accounts, "addrBytes is nil")
+				missingPreimages++
+				if missingPreimages%10000 == 0 {
+					log.Debug("missing perimages", "count", missingPreimages)
+				}
+				if conf.OnlyWithAddresses {
+					DebugForDetail(accounts, "return by OnlyWithAddresses")
+					return false
+				}
+			} else {
+				DebugForDetail(accounts, "addrBytes not nil")
+				addr = common.BytesToAddress(addrBytes)
+				address = &addr
+				account.Address = address
 			}
-		}
-		c.OnAccount(address, account)
-		accounts++
-		if time.Since(logged) > 8*time.Second {
-			log.Info("Trie dumping in progress", "at", it.Key, "accounts", accounts,
-				"elapsed", common.PrettyDuration(time.Since(start)))
-			logged = time.Now()
-		}
-		if conf.Max > 0 && accounts >= conf.Max {
-			if it.Next() {
-				nextKey = it.Key
+			obj := newObject(s, addr, &data)
+			DebugForDetail(accounts, "newObject")
+			if !conf.SkipCode {
+				account.Code = obj.Code()
+				DebugForDetail(accounts, "got code")
 			}
+			if !conf.SkipStorage {
+				account.Storage = make(map[common.Hash]string)
+				tr, err := obj.getTrie()
+				DebugForDetail(accounts, "got trie")
+				if err != nil {
+					log.Error("Failed to load storage trie", "err", err)
+					return false
+				}
+				trieIt, err := tr.NodeIterator(nil)
+				if err != nil {
+					log.Error("Failed to create trie iterator", "err", err)
+					return false
+				}
+				DebugForDetail(accounts, "got trieIt")
+				storageIt := trie.NewIterator(trieIt)
+				for storageIt.Next() {
+					_, content, _, err := rlp.Split(storageIt.Value)
+					if err != nil {
+						log.Error("Failed to decode the value returned by iterator", "error", err)
+						return false
+					}
+					account.Storage[common.BytesToHash(s.GetTrie().GetKey(storageIt.Key))] = common.Bytes2Hex(content)
+				}
+				DebugForDetail(accounts, "got storageIt")
+			}
+			c.OnAccount(address, account)
+			DebugForDetail(accounts, "OnAccount finished")
+			accounts++
+			if time.Since(logged) > 8*time.Second {
+				log.Info("Trie dumping in progress", "at", it.Key, "accounts", accounts,
+					"elapsed", common.PrettyDuration(time.Since(start)))
+				logged = time.Now()
+			}
+			if conf.Max > 0 && accounts >= conf.Max {
+				if it.Next() {
+					DebugForDetail(accounts, "next stopped")
+					nextKey = it.Key
+				}
+				return true
+			}
+
+			return false
+		}()
+
+		log.Debug("stop process", "count", accounts, "missingPreimages", missingPreimages)
+
+		if isBreak {
 			break
 		}
 	}
